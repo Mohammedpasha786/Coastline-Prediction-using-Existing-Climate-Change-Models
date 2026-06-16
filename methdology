@@ -1,0 +1,143 @@
+## 1. Overview
+
+The pipeline consists of four independent stages that can be mixed and matched:
+
+```
+  [Elevation Data]   [SLR Projections]
+        │                   │
+        ▼                   ▼
+  downloadUSGSDEM   fetchClimateSealevel
+        │                   │
+        └────────┬──────────┘
+                 ▼
+         predictCoastline
+                 │
+         ┌───────┴──────────┐
+         ▼                  ▼
+   visualizeCoastline  stats / export
+```
+
+---
+
+## 2. Digital Elevation Model (DEM)
+
+### Source
+The USGS National Map 3DEP service provides seamless, nationwide coverage:
+
+| Product | Resolution | Typical accuracy (RMSE) |
+|---------|-----------|------------------------|
+| 1/9 arc-second | ~3 m | ±0.15 m vertical |
+| 1/3 arc-second | ~10 m | ±0.30 m vertical |
+| 1 arc-second  | ~30 m | ±1.0 m vertical |
+
+The project defaults to 1 arc-second for fast downloads while retaining adequate accuracy for coastal planning at the 1–5 m SLR range.
+
+### Pre-processing
+1. Replace fill values (< −3×10⁸) with NaN.
+2. Remove anomalous extreme negatives (< −500 m).
+3. Optionally smooth with a 3×3 Gaussian kernel to reduce sensor noise.
+
+---
+
+## 3. Sea-Level Rise Projections
+
+### NOAA backend
+- Queries the nearest NOAA tide-gauge station using a great-circle search.
+- Retrieves the JSON projection endpoint at:  
+  `https://api.tidesandcurrents.noaa.gov/dpapi/prod/webapi/sltrends/slr.json`
+- Three scenarios align with IPCC AR5/NOAA 2022 Technical Report:
+  - **Low** ≈ RCP 2.6 (aggressive mitigation)
+  - **Intermediate** ≈ RCP 4.5
+  - **High** ≈ RCP 8.5 (business as usual)
+
+### Copernicus CDS backend
+- Uses CMIP6 multi-model ensemble from the C3S archive.
+- Scenario mapping: SSP1-2.6 / SSP2-4.5 / SSP5-8.5.
+- Data format: NetCDF (variable: `total_sea_level_change`, units: mm).
+
+### Synthetic fallback
+When no internet connection is available (offline demos, unit tests), the code falls back to IPCC AR6 Table 9.9 median SLR values interpolated with PCHIP splines.
+
+---
+
+## 4. Inundation Model
+
+### Bathtub method (implemented in `predictCoastline`)
+
+The simplest physically meaningful approach:  
+> A cell is inundated if its elevation ≤ (current sea level + SLR), **and** it is hydraulically connected to the open ocean.
+
+**Algorithm:**
+
+```
+1. Compute currentOcean  = (dem ≤ 0) | isnan(dem)
+2. Compute futureOcean   = (dem ≤ SLR) | isnan(dem)
+3. rawFlooded            = futureOcean AND NOT currentOcean
+4. CC = connected components of futureOcean (8-connectivity)
+5. Keep only components that overlap currentOcean  → connectedFuture
+6. floodedArea = connectedFuture AND NOT currentOcean
+7. Coastline  = bwboundaries(currentOcean | floodedArea)
+```
+
+**Why connectivity matters:**  
+Without step 4–5, inland depressions below the SLR threshold (e.g., quarries, lakes behind dunes) would incorrectly appear flooded. The connected-ocean filter ensures only cells that water can physically reach are marked.
+
+### Limitations of the bathtub model
+| Limitation | Description |
+|-----------|-------------|
+| No dynamics | Does not model wave propagation, tidal range, or storm surge |
+| Assumes static equilibrium | Ignores time-varying flooding/draining cycles |
+| No sediment transport | Shoreline erosion and deposition are not simulated |
+| Flat water surface | Ignores setup due to wind, pressure, or river discharge |
+
+For planning-grade assessments, couple this model with NOAA's SLOSH (storm surge) or ADCIRC (hydrodynamic) outputs.
+
+---
+
+## 5. Coastline Extraction
+
+`bwboundaries` (Image Processing Toolbox) traces the 8-connected boundary of the binary ocean mask using the Moore Neighbour Tracing algorithm. The result is converted from raster pixel coordinates to geographic (lat/lon) or map (x/y) coordinates using the raster reference object.
+
+Optional morphological closing (`strel('disk',1)`) removes single-pixel peninsulas that arise from DEM noise near the shoreline.
+
+---
+
+## 6. Visualization
+
+`visualizeCoastline` produces a multi-layer composite:
+
+| Layer | Rendering |
+|-------|-----------|
+| Terrain | Indexed colour from `terrain` colormap, blended 60/40 with gradient hillshade |
+| Ocean | Fixed dark-blue fill |
+| Flood mask | Semi-transparent (α = 0.35) blue overlay per scenario |
+| Coastline | Coloured polyline per scenario, line style cycling |
+| Colorbar | Elevation in metres above MSL |
+| Legend | Scenario labels with flood extent |
+
+---
+
+## 7. Uncertainty and Validation
+
+### Vertical accuracy
+A 1 arc-second DEM has a typical RMSE of ~1 m.  
+This means predictions for SLR < 1 m carry significant uncertainty and should be treated as indicative rather than definitive.
+
+### Model comparison approach
+Run `predictCoastline` for three scenarios simultaneously and overlay on the same map to communicate the range of plausible futures to stakeholders.
+
+### Cross-validation
+Where LIDAR data (< 0.15 m RMSE) is available from NOAA Digital Coast, replace the 3DEP DEM with the higher-accuracy LIDAR product for sub-metre resolution inundation mapping.
+
+---
+
+## 8. Computational Notes
+
+| Operation | Approx. time | Notes |
+|-----------|-------------|-------|
+| DEM download (1 arc-sec, 0.5° × 0.5°) | 5–20 s | Cached after first run |
+| SLR projection fetch | 2–5 s | Cached per station + scenario |
+| `predictCoastline` (1000×1000 grid) | < 1 s | Vectorized MATLAB ops |
+| `visualizeCoastline` | 1–3 s | Depends on GPU/graphics driver |
+
+For bounding boxes larger than ~1° × 1°, reduce `Resolution` to 3 arc-seconds to keep the DEM under 3000 × 3000 cells and maintain interactive response times.
