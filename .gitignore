@@ -1,0 +1,24 @@
+# MATLAB generated files
+*.asv
+*.m~
+*.mex*
+slprj/
+*.slxc
+
+# Cached / downloaded data (large binary files)
+data/*.tif
+data/*.img
+data/*.flt
+data/*.nc
+data/*.mat
+
+# Exported outputs
+output/*.png
+output/*.pdf
+output/*.gif
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
